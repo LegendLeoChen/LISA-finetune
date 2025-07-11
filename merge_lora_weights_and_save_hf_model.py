@@ -20,7 +20,7 @@ def parse_args(args):
         description="merge lora weights and save model with hf format"
     )
     parser.add_argument(
-        "--version", default="./weight/lisa"
+        "--version", default="./weight/lisa_feedback"
     )
     parser.add_argument("--vis_save_path", default="./vis_output", type=str)
     parser.add_argument(
@@ -50,8 +50,8 @@ def parse_args(args):
         type=str,
         choices=["llava_v1", "llava_llama_2"],
     )
-    parser.add_argument("--weight", default="./runs/lisa/pytorch_model.bin", type=str)
-    parser.add_argument("--save_path", default="./weight/lisa_model_finetuned", type=str)
+    parser.add_argument("--weight", default="./pytorch_model.bin", type=str)
+    parser.add_argument("--save_path", default="./weight/lisa_enhancemlp", type=str)
     return parser.parse_args(args)
 
 
@@ -143,15 +143,18 @@ def main(args):
 
     model.resize_token_embeddings(len(tokenizer))
 
-    state_dict = torch.nn.Module().state_dict()
-    # 遍历所有分割的权重文件
-    for i in range(1, 5):
-        file_path = f'{args.weight}/pytorch_model-0000{i}-of-00004.bin'
-        state_dict_part = torch.load(file_path, map_location=torch.device('cpu'))
-        state_dict.update(state_dict_part)
-    # state_dict = torch.load(args.weight, map_location="cpu")
+    # 单卡直接跑train_ds.py得到的权重用这段
+    # state_dict = torch.nn.Module().state_dict()
+    # for i in range(1, 5):
+    #     file_path = f'{args.weight}/pytorch_model-0000{i}-of-00004.bin'
+    #     state_dict_part = torch.load(file_path, map_location=torch.device('cpu'))
+    #     state_dict.update(state_dict_part)
+    
+    # 多卡deepspeed指令得到的权重用这段
+    state_dict = torch.load(args.weight, map_location="cpu")
+    
     model.load_state_dict(state_dict, strict=True)
-
+    
     model = model.merge_and_unload()
     state_dict = {}
     for k, v in model.state_dict().items():

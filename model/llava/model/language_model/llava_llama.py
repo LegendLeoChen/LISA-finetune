@@ -85,6 +85,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             past_key_values,
             inputs_embeds,
             labels,
+            image_features,
         ) = self.prepare_inputs_labels_for_multimodal(
             input_ids, attention_mask, past_key_values, labels, images
         )
@@ -121,7 +122,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        if self.training:
+        if self.training or 1:
             output_hidden_states = outputs.hidden_states
         else:
             output_hidden_states = hidden_states
@@ -132,7 +133,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             past_key_values=outputs.past_key_values,
             hidden_states=output_hidden_states,  # outputs.hidden_states,
             attentions=outputs.attentions,
-        )
+        ), image_features
 
     def prepare_inputs_for_generation(
         self,

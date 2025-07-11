@@ -283,8 +283,8 @@ class ValDataset(torch.utils.data.Dataset):
         val_dataset,
         image_size=1024,
     ):
-        self.base_image_dir = base_image_dir
         splits = val_dataset.split("|")
+        self.base_image_dir = base_image_dir
         if len(splits) == 2:
             ds, split = splits
             images = glob.glob(
@@ -294,7 +294,7 @@ class ValDataset(torch.utils.data.Dataset):
             self.data_type = "reason_seg"
         elif len(splits) == 3:
             ds, splitBy, split = splits
-            refer_api = REFER(self.base_image_dir, ds, splitBy)
+            refer_api = REFER(os.path.join(self.base_image_dir, "refer_seg"), ds, splitBy)
             ref_ids_val = refer_api.getRefIds(split=split)
             images_ids_val = refer_api.getImgIds(ref_ids=ref_ids_val)
             refs_val = refer_api.loadRefs(ref_ids=ref_ids_val)
@@ -305,11 +305,11 @@ class ValDataset(torch.utils.data.Dataset):
                 item = item.copy()
                 if ds == "refclef":
                     item["file_name"] = os.path.join(
-                        base_image_dir, "images/saiapr_tc-12", item["file_name"]
+                        self.base_image_dir, "refer_seg", "images/saiapr_tc-12", item["file_name"]
                     )
                 elif ds in ["refcoco", "refcoco+", "refcocog", "grefcoco"]:
                     item["file_name"] = os.path.join(
-                        base_image_dir,
+                        self.base_image_dir, "refer_seg",
                         "images/mscoco/images/train2014",
                         item["file_name"],
                     )

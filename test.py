@@ -24,7 +24,7 @@ os.chdir(sys.path[0])
 
 def parse_args(args):
     parser = argparse.ArgumentParser(description="LISA chat")
-    parser.add_argument("--version", default="./weight/lisa_model_finetuned")
+    parser.add_argument("--version", default="./weight/lisa")
     parser.add_argument("--vis_save_path", default="./vis_output/my", type=str)
     parser.add_argument(
         "--precision",
@@ -168,7 +168,7 @@ def main(args):
         conv = conversation_lib.conv_templates[args.conv_type].copy()
         conv.messages = []
 
-        prompt = "segment all the vessels in this image"
+        prompt = "Please segment all the vessels in this image."
         prompt = DEFAULT_IMAGE_TOKEN + "\n" + prompt
         if args.use_mm_start_end:
             replace_token = (

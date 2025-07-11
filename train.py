@@ -62,7 +62,7 @@ def parse_args(args):
     parser.add_argument("--val_dataset", default="ReasonSeg|val", type=str)
     parser.add_argument("--dataset_dir", default="./dataset", type=str)
     parser.add_argument("--log_base_dir", default="./runs", type=str)
-    parser.add_argument("--exp_name", default="lisa", type=str)
+    parser.add_argument("--exp_name", default="lisa2", type=str)
     parser.add_argument("--epochs", default=10, type=int)
     parser.add_argument("--steps_per_epoch", default=1500, type=int)
     parser.add_argument(
@@ -75,7 +75,7 @@ def parse_args(args):
     )
     parser.add_argument("--val_batch_size", default=1, type=int)
     parser.add_argument("--workers", default=4, type=int)
-    parser.add_argument("--lr", default=0.001, type=float)
+    parser.add_argument("--lr", default=0.0008, type=float)
     parser.add_argument("--ce_loss_weight", default=0.2, type=float)
     parser.add_argument("--dice_loss_weight", default=0.5, type=float)
     parser.add_argument("--bce_loss_weight", default=2.0, type=float)

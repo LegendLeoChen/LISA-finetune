@@ -104,5 +104,31 @@ def _build_sam(
     if checkpoint is not None:
         with open(checkpoint, "rb") as f:
             state_dict = torch.load(f)
-        sam.load_state_dict(state_dict, strict=False)
+        sam.load_state_dict(state_dict, strict=False, assign=True)
+
+    from torch import nn
+    device = torch.device("cuda")
+    for name, param in sam.named_parameters():
+        data = param.data
+        # 1) 如果是 meta 张量，先创建一个同 shape/dtype 的真实张量
+        if hasattr(data, "is_meta") and data.is_meta:
+            real = torch.empty(
+                data.shape,
+                dtype=data.dtype,      # 保持原 dtype
+                device=device          # 直接放到 CUDA
+            )
+            # 用 nn.Parameter 完全替换，确保整个 Parameter 对象都绑定到真实张量上
+            new_p = nn.Parameter(real, requires_grad=param.requires_grad)
+            # 把它插回到 model 里
+            parent, attr = name.rsplit(".", 1)
+            # 递归拿到父 module
+            mod = sam
+            for sub in parent.split("."):
+                mod = getattr(mod, sub)
+            setattr(mod, attr, new_p)
+        # 2) 如果已经有真实张量，但是 non‑contiguous，强制 contiguous + clone + to(device)
+        else:
+            if not data.is_contiguous() or data.device != device:
+                new_data = data.contiguous().clone().detach().to(device)
+                param.data = new_data
     return sam

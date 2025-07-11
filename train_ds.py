@@ -25,9 +25,9 @@ def parse_args(args):
     parser = argparse.ArgumentParser(description="LISA Model Training")
     parser.add_argument("--local_rank", default=0, type=int, help="node rank")
     parser.add_argument(
-        "--version", default="liuhaotian/llava-llama-2-13b-chat-lightning-preview"
+        "--version", default="./weight/lisa_enhancemlp", help="./weight/lisa"
     )
-    parser.add_argument("--vis_save_path", default="./vis_output", type=str)
+    parser.add_argument("--vis_save_path", default="./vis_output/my", type=str)
     parser.add_argument(
         "--precision",
         default="bf16",
@@ -39,18 +39,18 @@ def parse_args(args):
     parser.add_argument("--model_max_length", default=512, type=int)
     parser.add_argument("--lora_r", default=8, type=int)
     parser.add_argument(
-        "--vision-tower", default="openai/clip-vit-large-patch14", type=str
+        "--vision-tower", default="./weight/clip-vit-large-patch14", type=str
     )
     parser.add_argument("--load_in_8bit", action="store_true", default=False)
     parser.add_argument("--load_in_4bit", action="store_true", default=False)
 
     parser.add_argument(
-        "--dataset", default="sem_seg||refer_seg||vqa||reason_seg", type=str
+        "--dataset", default="sem_seg||refer_seg||reason_seg", type=str
     )
-    parser.add_argument("--sample_rates", default="9,3,3,1", type=str)
+    parser.add_argument("--sample_rates", default="10,8,1", type=str)
     parser.add_argument(
         "--sem_seg_data",
-        default="ade20k||cocostuff||pascal_part||paco_lvis||mapillary",
+        default="ade20k||cocostuff",
         type=str,
     )
     parser.add_argument(
@@ -58,26 +58,28 @@ def parse_args(args):
     )
     parser.add_argument("--vqa_data", default="llava_instruct_150k", type=str)
     parser.add_argument("--reason_seg_data", default="ReasonSeg|train", type=str)
-    parser.add_argument("--val_dataset", default="ReasonSeg|val", type=str)
-    parser.add_argument("--dataset_dir", default="./dataset", type=str)
+    parser.add_argument("--val_dataset", default="refcoco|unc|testA", type=str, help="refcoco|unc|testA, refcocog|umd|test")
+    parser.add_argument("--dataset_dir", default="../datasets", type=str)
     parser.add_argument("--log_base_dir", default="./runs", type=str)
     parser.add_argument("--exp_name", default="lisa", type=str)
-    parser.add_argument("--epochs", default=10, type=int)
+    parser.add_argument("--epochs", default=120, type=int)
     parser.add_argument("--steps_per_epoch", default=500, type=int)
     parser.add_argument(
-        "--batch_size", default=2, type=int, help="batch size per device per step"
+        "--batch_size", default=14, type=int, help="batch size per device per step"
     )
     parser.add_argument(
         "--grad_accumulation_steps",
-        default=10,
+        default=1,
         type=int,
     )
     parser.add_argument("--val_batch_size", default=1, type=int)
-    parser.add_argument("--workers", default=4, type=int)
-    parser.add_argument("--lr", default=0.0003, type=float)
-    parser.add_argument("--ce_loss_weight", default=1.0, type=float)
-    parser.add_argument("--dice_loss_weight", default=0.5, type=float)
-    parser.add_argument("--bce_loss_weight", default=2.0, type=float)
+    parser.add_argument("--workers", default=16, type=int)
+    parser.add_argument("--lr", default=0.00035, type=float)
+    parser.add_argument("--ce_loss_weight", default=0.2, type=float)
+    parser.add_argument("--dice_loss_weight", default=1, type=float)
+    parser.add_argument("--bce_loss_weight", default=1.5, type=float)
+    parser.add_argument("--iou_loss_weight", default=0.3, type=float)
+    parser.add_argument("--boundary_loss_weight", default=0.3, type=float)
     parser.add_argument("--lora_alpha", default=16, type=int)
     parser.add_argument("--lora_dropout", default=0.05, type=float)
     parser.add_argument("--lora_target_modules", default="q_proj,v_proj", type=str)
@@ -88,7 +90,7 @@ def parse_args(args):
     parser.add_argument("--exclude_val", action="store_true", default=False)
     parser.add_argument("--no_eval", action="store_true", default=False)
     parser.add_argument("--eval_only", action="store_true", default=False)
-    parser.add_argument("--vision_pretrained", default="PATH_TO_SAM_ViT-H", type=str)
+    parser.add_argument("--vision_pretrained", default="./weight/sam_vit_h_4b8939.pth", type=str)
     parser.add_argument("--out_dim", default=256, type=int)
     parser.add_argument("--resume", default="", type=str)
     parser.add_argument("--print_freq", default=1, type=int)
@@ -138,6 +140,8 @@ def main(args):
         "ce_loss_weight": args.ce_loss_weight,
         "dice_loss_weight": args.dice_loss_weight,
         "bce_loss_weight": args.bce_loss_weight,
+        "iou_loss_weight": args.iou_loss_weight,
+        "boundary_loss_weight": args.boundary_loss_weight,
         "seg_token_idx": args.seg_token_idx,
         "vision_pretrained": args.vision_pretrained,
         "vision_tower": args.vision_tower,
@@ -293,13 +297,16 @@ def main(args):
             "enabled": args.precision == "bf16",
         },
         "gradient_clipping": 1.0,
+        # "zero_optimization": {
+        #     "stage": 2,
+        #     "contiguous_gradients": True,
+        #     "overlap_comm": True,
+        #     "reduce_scatter": True,
+        #     "reduce_bucket_size": 5e8,
+        #     "allgather_bucket_size": 5e8,
+        # },
         "zero_optimization": {
-            "stage": 2,
-            "contiguous_gradients": True,
-            "overlap_comm": True,
-            "reduce_scatter": True,
-            "reduce_bucket_size": 5e8,
-            "allgather_bucket_size": 5e8,
+            "stage": 1
         },
     }
     model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
@@ -378,9 +385,12 @@ def main(args):
 
         if args.no_eval == False:
             giou, ciou = validate(val_loader, model_engine, epoch, writer, args)
-            is_best = giou > best_score
-            best_score = max(giou, best_score)
-            cur_ciou = ciou if is_best else cur_ciou
+            # is_best = giou > best_score
+            # best_score = max(giou, best_score)
+            # cur_ciou = ciou if is_best else cur_ciou
+            is_best = ciou > cur_ciou
+            cur_ciou = max(ciou, cur_ciou)
+            best_score = giou if is_best else best_score
 
         if args.no_eval or is_best:
             save_dir = os.path.join(args.log_dir, "ckpt_model")
@@ -416,25 +426,29 @@ def train(
     ce_losses = AverageMeter("CeLoss", ":.4f")
     mask_bce_losses = AverageMeter("MaskBCELoss", ":.4f")
     mask_dice_losses = AverageMeter("MaskDICELoss", ":.4f")
+    mask_iou_losses = AverageMeter("MaskIOULoss", ":.4f")
+    mask_boundary_losses = AverageMeter("MaskBoundaryLoss", ":.4f")
     mask_losses = AverageMeter("MaskLoss", ":.4f")
 
-    progress = ProgressMeter(
-        args.steps_per_epoch,
-        [
-            batch_time,
-            losses,
-            ce_losses,
-            mask_losses,
-            mask_bce_losses,
-            mask_dice_losses,
-        ],
-        prefix="Epoch: [{}]".format(epoch),
-    )
+    # progress = ProgressMeter(
+    #     args.steps_per_epoch,
+    #     [
+    #         batch_time,
+    #         losses,
+    #         ce_losses,
+    #         mask_losses,
+    #         mask_bce_losses,
+    #         mask_dice_losses,
+    #     ],
+    #     prefix="Epoch: [{}]".format(epoch),
+    # )
 
     # switch to train mode
     model.train()
     end = time.time()
-    for global_step in range(args.steps_per_epoch):
+    progress_bar = tqdm.tqdm(range(args.steps_per_epoch), desc=f"Epoch[{epoch}/{args.epochs}]", unit="step", colour="#ff69b4")
+    for global_step, _ in enumerate(progress_bar):
+        now_step = global_step + epoch * args.steps_per_epoch
         for i in range(args.grad_accumulation_steps):
             try:
                 input_dict = next(train_iter)
@@ -461,15 +475,22 @@ def train(
             ce_loss = output_dict["ce_loss"]
             mask_bce_loss = output_dict["mask_bce_loss"]
             mask_dice_loss = output_dict["mask_dice_loss"]
+            mask_iou_loss = output_dict["mask_iou_loss"]
+            mask_boundary_loss = output_dict["mask_boundary_loss"]
             mask_loss = output_dict["mask_loss"]
 
             losses.update(loss.item(), input_dict["images"].size(0))
             ce_losses.update(ce_loss.item(), input_dict["images"].size(0))
             mask_bce_losses.update(mask_bce_loss.item(), input_dict["images"].size(0))
             mask_dice_losses.update(mask_dice_loss.item(), input_dict["images"].size(0))
+            mask_iou_losses.update(mask_iou_loss.item(), input_dict["images"].size(0))
+            mask_boundary_losses.update(mask_boundary_loss.item(), input_dict["images"].size(0))
             mask_losses.update(mask_loss.item(), input_dict["images"].size(0))
+        
             model.backward(loss)
-            model.step()
+            
+        model.step()
+        model.zero_grad()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -484,38 +505,58 @@ def train(
                 ce_losses.all_reduce()
                 mask_bce_losses.all_reduce()
                 mask_dice_losses.all_reduce()
+                mask_iou_losses.all_reduce()
+                mask_boundary_losses.all_reduce()
                 mask_losses.all_reduce()
 
             if args.local_rank == 0:
-                progress.display(global_step + 1)
-                writer.add_scalar("train/loss", losses.avg, global_step)
-                writer.add_scalar("train/ce_loss", ce_losses.avg, global_step)
+                # progress.display(global_step + 1)
+                writer.add_scalar("train/loss", losses.avg, now_step)
+                writer.add_scalar("train/ce_loss", ce_losses.avg, now_step)
                 writer.add_scalar(
-                    "train/mask_bce_loss", mask_bce_losses.avg, global_step
+                    "train/mask_bce_loss", mask_bce_losses.avg, now_step
                 )
                 writer.add_scalar(
-                    "train/mask_dice_loss", mask_dice_losses.avg, global_step
-                )
-                writer.add_scalar("train/mask_loss", mask_losses.avg, global_step)
-                writer.add_scalar(
-                    "metrics/total_secs_per_batch", batch_time.avg, global_step
+                    "train/mask_dice_loss", mask_dice_losses.avg, now_step
                 )
                 writer.add_scalar(
-                    "metrics/data_secs_per_batch", data_time.avg, global_step
+                    "train/mask_iou_loss", mask_iou_losses.avg, now_step
                 )
-
+                writer.add_scalar(
+                    "train/mask_boundary_loss", mask_boundary_losses.avg, now_step
+                )
+                writer.add_scalar("train/mask_loss", mask_losses.avg, now_step)
+                writer.add_scalar(
+                    "metrics/total_secs_per_batch", batch_time.avg, now_step
+                )
+                writer.add_scalar(
+                    "metrics/data_secs_per_batch", data_time.avg, now_step
+                )
+                
+            progress_bar.set_postfix({
+                'Loss': f'{losses.avg:.4f}',
+                'CeLoss': f'{ce_losses.avg:.4f}',
+                'MaskLoss': f'{mask_losses.avg:.4f}',
+                'MaskBCELoss': f'{mask_bce_losses.avg:.4f}',
+                'MaskDICELoss': f'{mask_dice_losses.avg:.4f}',
+                'MaskIOULoss': f'{mask_iou_losses.avg:.4f}',
+                'MaskBoundaryLoss': f'{mask_boundary_losses.avg:.4f}'
+            })
+            
             batch_time.reset()
             data_time.reset()
             losses.reset()
             ce_losses.reset()
             mask_bce_losses.reset()
             mask_dice_losses.reset()
+            mask_iou_losses.reset()
+            mask_boundary_losses.reset()
             mask_losses.reset()
 
         if global_step != 0:
             curr_lr = scheduler.get_last_lr()
             if args.local_rank == 0:
-                writer.add_scalar("train/lr", curr_lr[0], global_step)
+                writer.add_scalar("train/lr", curr_lr[0], now_step)
 
     return train_iter
 
@@ -527,7 +568,7 @@ def validate(val_loader, model_engine, epoch, writer, args):
 
     model_engine.eval()
 
-    for input_dict in tqdm.tqdm(val_loader):
+    for input_dict in tqdm.tqdm(val_loader, colour='blue'):
         torch.cuda.empty_cache()
 
         input_dict = dict_to_cuda(input_dict)

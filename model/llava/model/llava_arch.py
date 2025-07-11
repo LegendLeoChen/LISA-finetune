@@ -33,6 +33,21 @@ class LlavaMetaModel:
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = nn.Linear(config.mm_hidden_size, config.hidden_size)
+            # 改为MLP，而非单个线性层
+            # self.mm_projector1 = nn.Sequential(
+            #     nn.Linear(self.config.mm_hidden_size, self.config.hidden_size * 2),
+            #     nn.SiLU(),
+            #     nn.Linear(self.config.hidden_size * 2, self.config.hidden_size * 2),
+            #     nn.SiLU(),
+            #     nn.Linear(self.config.hidden_size * 2, self.config.hidden_size)
+            # )
+            # def init_weights(m):
+            #     if isinstance(m, nn.Linear):
+            #         nn.init.xavier_uniform_(m.weight)
+            #         if m.bias is not None:
+            #             nn.init.zeros_(m.bias)
+
+            # self.mm_projector1.apply(init_weights)
 
     def get_vision_tower(self):
         vision_tower = getattr(self, "vision_tower", None)
@@ -344,7 +359,7 @@ class LlavaMetaForCausalLM(ABC):
                 )
                 assert attention_mask.shape == new_input_embeds.shape[:2]
 
-        return None, attention_mask, past_key_values, new_input_embeds, new_labels
+        return None, attention_mask, past_key_values, new_input_embeds, new_labels, image_features
 
     # def initialize_vision_tokenizer(self, model_args, tokenizer):
     def initialize_vision_tokenizer(self, model_args, num_new_tokens):

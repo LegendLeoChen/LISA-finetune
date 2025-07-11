@@ -13,6 +13,58 @@ from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
 from .segment_anything import build_sam_vit_h
 
 
+def iou_loss(inputs, targets, num_masks, eps=1e-6):
+    """
+    IoU (Jaccard) Loss for binary mask segmentation.
+    新增IoU损失
+    Args:
+        inputs: logits tensor, shape [B, H, W] or [B, 1, H, W]
+        targets: ground truth mask, same shape as inputs
+        num_masks: normalization factor, usually number of masks in batch
+    """
+    inputs = inputs.sigmoid().flatten(1)
+    targets = targets.flatten(1)
+
+    intersection = (inputs * targets).sum(-1)
+    union = inputs.sum(-1) + targets.sum(-1) - intersection
+
+    iou = (intersection + eps) / (union + eps)
+    loss = 1 - iou
+    return loss.sum() / (num_masks + 1e-8)
+
+
+def boundary_loss(inputs, targets, num_masks, eps=1e-6):
+    """
+    Boundary loss using Sobel operator to extract edges. 
+    边界损失，使用卷积算子求边缘，计算两个mask边缘L1损失。
+    Args:
+        inputs: logits tensor, shape [B, H, W] or [B, 1, H, W]
+        targets: ground truth mask, same shape as inputs
+        num_masks: normalization factor, usually number of masks in batch
+    """
+    if inputs.shape[0] == 0:
+        return torch.tensor(0.0, device=inputs.device, requires_grad=True)
+    inputs = inputs.sigmoid()
+
+    # Sobel filter for edge detection
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=inputs.dtype, device=inputs.device).view(1,1,3,3)
+    sobel_y = torch.tensor([[-1,-2,-1], [0,0,0], [1,2,1]], dtype=inputs.dtype, device=inputs.device).view(1,1,3,3)
+
+    # ➔ groups=inputs.shape[1] 逐通道卷积
+    edge_pred_x = F.conv2d(inputs, sobel_x.expand(inputs.shape[0], 1, 3, 3), padding=1, groups=inputs.shape[0])
+    edge_pred_y = F.conv2d(inputs, sobel_y.expand(inputs.shape[0], 1, 3, 3), padding=1, groups=inputs.shape[0])
+    edge_pred = torch.sqrt(edge_pred_x**2 + edge_pred_y**2 + eps)
+
+    targets = targets.float()
+    edge_gt_x = F.conv2d(targets, sobel_x.expand(targets.shape[0], 1, 3, 3), padding=1, groups=targets.shape[0])
+    edge_gt_y = F.conv2d(targets, sobel_y.expand(targets.shape[0], 1, 3, 3), padding=1, groups=targets.shape[0])
+    edge_gt = torch.sqrt(edge_gt_x**2 + edge_gt_y**2 + eps)
+
+    loss = F.l1_loss(edge_pred, edge_gt, reduction="none")
+    loss = loss.flatten(1).mean(1)       # → shape [1, 3]
+    loss = loss.mean()                   # → scalar
+    return loss
+
 def dice_loss(
     inputs: torch.Tensor,
     targets: torch.Tensor,
@@ -59,6 +111,93 @@ def sigmoid_ce_loss(
     return loss
 
 
+class MultiLayerTextEncoder(nn.Module):
+    def __init__(self, selected_layers, hidden_size, out_dim, dropout=0.1):
+        """
+        selected_layers: List[int], 1-based layer numbers, e.g., [29, 31, 33]
+        hidden_size: input hidden dimension (from LLaMA)
+        out_dim: desired output dim
+        """
+        super().__init__()
+        self.selected_layers = selected_layers
+        self.fcs = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_size, hidden_size),
+                # nn.GELU(),
+                nn.SiLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_size, out_dim),
+            )
+            for _ in selected_layers
+        ])
+        
+        self.layer_weights = nn.Parameter(torch.ones(len(selected_layers))) # 可学习权重
+        # 初始化所有参数
+        self._init_weights()
+
+    def _init_weights(self):
+        for fc_block in self.fcs:
+            for layer in fc_block:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+        # 初始化层融合权重为均匀分布（避免训练初期偏置某一层）
+        nn.init.constant_(self.layer_weights, 1.0 / len(self.selected_layers))
+        
+    def forward(self, all_hidden_states):
+        """
+        all_hidden_states: List of [B, T, D], length = num_total_layers (e.g., 33)
+        Returns:
+            fused: [B, T, out_dim]
+        """
+        outputs = []
+        for i, layer_id in enumerate(self.selected_layers):
+            # Convert from 1-based to 0-based (layer 1 = last layer)
+            x = all_hidden_states[-layer_id]  # [B, T, D]
+            outputs.append(self.fcs[i](x))      # [B, T, out_dim]
+
+        # average fusion
+        stacked = torch.stack(outputs, dim=0)  # [L, B, T, D]
+        weights = F.softmax(self.layer_weights, dim=0).view(-1, 1, 1, 1)
+        fused = (weights * stacked).sum(dim=0)          # 加权求和
+        return fused
+
+class ImageFeatureProjector(nn.Module):
+    def __init__(self, input_dim=4096, hidden_dim=2048, output_channels=256, seq_h=16, seq_w=16, out_h=64, out_w=64):
+        super().__init__()
+
+        self.seq_h = seq_h
+        self.seq_w = seq_w
+        self.out_h = out_h
+        self.out_w = out_w
+        self.output_channels = output_channels
+
+        # 先用 MLP 把每个 token 的特征变成 output_channels
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, output_channels)
+        )
+
+        # 用卷积上采样：16x16 -> 64x64
+        self.upsample = nn.Sequential(
+            nn.ConvTranspose2d(output_channels, output_channels, kernel_size=4, stride=4)  # 16x16 -> 64x64
+        )
+
+    def forward(self, x):
+        # x: [n, 256, 4096]
+        n, seq, dim = x.shape
+        # assert seq == self.seq_h * self.seq_w, f"输入序列长度应为 {self.seq_h*self.seq_w}, 当前是 {seq}"
+
+        x = self.mlp(x)          # -> [n, 256, output_channels]
+        x = x.mean(0, keepdim=True)  # -> [1, 256, output_channels]
+        x = x.transpose(1, 2)    # -> [1, output_channels, 256]
+        x = x.reshape(1, self.output_channels, self.seq_h, self.seq_w)  # -> [1, C, 16, 16]
+        x = self.upsample(x)     # -> [1, C, 64, 64]
+
+        return x
+    
 class LisaMetaModel:
     def __init__(
         self,
@@ -89,6 +228,8 @@ class LisaMetaModel:
         # Projection layer
         in_dim = config.hidden_size
         out_dim = config.out_dim
+        
+        # 原版
         text_fc = [
             nn.Linear(in_dim, in_dim),
             nn.ReLU(inplace=True),
@@ -96,9 +237,20 @@ class LisaMetaModel:
             nn.Dropout(0.0),
         ]
         self.text_hidden_fcs = nn.ModuleList([nn.Sequential(*text_fc)])
+        
+        # 多隐藏特征融合
+        self.text_hidden_fcs1 = MultiLayerTextEncoder(
+            selected_layers=[15, 10, 5, 3, 1],      # 最后第n层
+            hidden_size=in_dim,               # 视具体模型而定（LLaMA-7B 是 4096）
+            out_dim=out_dim,                    # 你需要的输出维度
+            dropout=0.1
+        )
+        
         self.text_hidden_fcs.train()
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True
+        
+        self.projector = ImageFeatureProjector()
 
 
 class LisaModel(LisaMetaModel, LlavaLlamaModel):
@@ -131,14 +283,14 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             config.mm_vision_tower = kwargs.get(
                 "vision_tower", "openai/clip-vit-large-patch14"
             )
-            self.ce_loss_weight = kwargs.pop("ce_loss_weight", None)
-            self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
-            self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
         else:
             config.mm_vision_tower = config.vision_tower
-            self.ce_loss_weight = kwargs.pop("ce_loss_weight", None)
-            self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
-            self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
+            
+        self.ce_loss_weight = kwargs.pop("ce_loss_weight", None)
+        self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
+        self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
+        self.iou_loss_weight = kwargs.pop("iou_loss_weight", None)
+        self.boundary_loss_weight = kwargs.pop("boundary_loss_weight", None)
             
         self.seg_token_idx = kwargs.pop("seg_token_idx")
 
@@ -181,6 +333,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         label_list: List[torch.Tensor],
         resize_list: List[tuple],
         inference: bool = False,
+        feedback: bool = True,
+        enhance_mlp: bool = True,
+        vision_mix: bool = True,
         **kwargs,
     ):
         image_embeddings = self.get_visual_embs(images)
@@ -207,22 +362,34 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             assert images_clip.shape[0] == 1
             images_clip_extend = images_clip.expand(length, -1, -1, -1).contiguous()
 
-            output_hidden_states = []
+            # output_hidden_states 是 list of tuple (每个batch一个hidden_states tuple)
+            output_hidden_states_batches = []
+
             for i in range(n_batch):
                 start_i, end_i = i * length, min((i + 1) * length, input_ids.shape[0])
-                output_i = super().forward(
+                output_i, image_features = super().forward(
                     images=images_clip_extend[: end_i - start_i],
                     attention_mask=attention_masks[start_i:end_i],
                     input_ids=input_ids[start_i:end_i],
                     output_hidden_states=True,
                 )
-                output_hidden_states.append(output_i.hidden_states)
+                output_hidden_states_batches.append(output_i.hidden_states)  # tuple of layers
+                if vision_mix:
+                    image_embeddings[i] = 0.3 * self.model.projector(image_features) + 0.7 * image_embeddings[i]
                 torch.cuda.empty_cache()
 
-            output_hidden_states_list = []
-            output_hidden_states_level = torch.cat(output_hidden_states, dim=0)
-            output_hidden_states_list.append(output_hidden_states_level)
-            output_hidden_states = output_hidden_states_list
+            # 现在 output_hidden_states_batches 是一个 list，里面每个元素是一个 hidden_states 的 tuple（长度为 num_layers）
+
+            # 将每层的结果拼接：output_hidden_states[layer] 结构对齐训练模式
+            num_layers = len(output_hidden_states_batches[0])  # 通常是13或25层
+            output_hidden_states = []
+
+            for layer_idx in range(num_layers):
+                # 取出所有 batch 在该层的输出，并拼接
+                layer_outputs = [batch_hidden[layer_idx] for batch_hidden in output_hidden_states_batches]
+                merged_layer = torch.cat(layer_outputs, dim=0)  # 沿 batch 维拼接
+                output_hidden_states.append(merged_layer)
+
             output = None
 
         else:
@@ -238,7 +405,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 images_clip_list.append(images_clip_i)
             images_clip = torch.cat(images_clip_list, dim=0)
 
-            output = super().forward(
+            output, image_features = super().forward(
                 images=images_clip,
                 attention_mask=attention_masks,
                 input_ids=input_ids,
@@ -246,11 +413,20 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 output_hidden_states=True,
             )
             output_hidden_states = output.hidden_states
+            if vision_mix:
+                for i in range(len(offset) - 1):
+                    start, end = offset[i], offset[i + 1]
+                    chunk = image_features[start:end]  # [n_i, 256, 4096]
+                    image_embeddings[i] = 0.3 * self.model.projector(chunk) + 0.7 * image_embeddings[i]      # -> [1, C, H, W]
 
         hidden_states = []
 
         assert len(self.model.text_hidden_fcs) == 1
-        hidden_states.append(self.model.text_hidden_fcs[0](output_hidden_states[-1]))
+        
+        if not enhance_mlp:
+            hidden_states.append(self.model.text_hidden_fcs[0](output_hidden_states[-1]))     # 原版
+        else:
+            hidden_states.append(self.model.text_hidden_fcs1(output_hidden_states))       # 多隐藏特征融合
 
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
         pred_embeddings = last_hidden_state[seg_token_mask]
@@ -270,12 +446,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         pred_embeddings = pred_embeddings_
 
         multimask_output = False
-        pred_masks = []
+        pred_masks, low_masks = [], []
         for i in range(len(pred_embeddings)):
-            (
-                sparse_embeddings,
-                dense_embeddings,
-            ) = self.model.visual_model.prompt_encoder(
+            sparse_embeddings, dense_embeddings = self.model.visual_model.prompt_encoder(
                 points=None,
                 boxes=None,
                 masks=None,
@@ -294,8 +467,33 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 input_size=resize_list[i],
                 original_size=label_list[i].shape,
             )
+            low_masks.append(low_res_masks[:, 0])
             pred_masks.append(pred_mask[:, 0])
-
+        
+        if feedback:
+            pred_masks = []
+            for i in range(len(pred_embeddings)):
+                sparse_embeddings2, dense_embeddings2 = self.model.visual_model.prompt_encoder(
+                    points=None,
+                    boxes=None,
+                    masks=low_masks[i].to(pred_embeddings[i].dtype).unsqueeze(1),
+                    text_embeds=pred_embeddings[i].unsqueeze(1),
+                )
+                sparse_embeddings2 = sparse_embeddings2.to(pred_embeddings[i].dtype)
+                low_res_masks2, iou_predictions = self.model.visual_model.mask_decoder(
+                    image_embeddings=image_embeddings[i].unsqueeze(0),
+                    image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embeddings2,
+                    dense_prompt_embeddings=dense_embeddings2,
+                    multimask_output=multimask_output,
+                )
+                pred_mask2 = self.model.visual_model.postprocess_masks(
+                    low_res_masks2,
+                    input_size=resize_list[i],
+                    original_size=label_list[i].shape,
+                )
+                pred_masks.append(pred_mask2[:, 0])
+        
         model_output = output
         gt_masks = masks_list
 
@@ -311,6 +509,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         ce_loss = ce_loss * self.ce_loss_weight
         mask_bce_loss = 0
         mask_dice_loss = 0
+        mask_iou_loss = 0
+        mask_boundary_loss = 0
         num_masks = 0
         for batch_idx in range(len(pred_masks)):
             gt_mask = gt_masks[batch_idx]
@@ -329,11 +529,21 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 dice_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
                 * gt_mask.shape[0]
             )
+            mask_iou_loss += (
+                iou_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
+                * gt_mask.shape[0]
+            )
+            mask_boundary_loss += (
+                boundary_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
+                * gt_mask.shape[0]
+            )
             num_masks += gt_mask.shape[0]
 
         mask_bce_loss = self.bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
         mask_dice_loss = self.dice_loss_weight * mask_dice_loss / (num_masks + 1e-8)
-        mask_loss = mask_bce_loss + mask_dice_loss
+        mask_iou_loss = self.iou_loss_weight * mask_iou_loss / (num_masks + 1e-8)
+        mask_boundary_loss = self.boundary_loss_weight * mask_boundary_loss / (num_masks + 1e-8)
+        mask_loss = mask_bce_loss + mask_dice_loss + mask_iou_loss + mask_boundary_loss
 
         loss = ce_loss + mask_loss
 
@@ -342,6 +552,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             "ce_loss": ce_loss,
             "mask_bce_loss": mask_bce_loss,
             "mask_dice_loss": mask_dice_loss,
+            "mask_iou_loss": mask_iou_loss,
+            "mask_boundary_loss": mask_boundary_loss,
             "mask_loss": mask_loss,
         }
 
