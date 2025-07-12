@@ -367,12 +367,13 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
             for i in range(n_batch):
                 start_i, end_i = i * length, min((i + 1) * length, input_ids.shape[0])
-                output_i, image_features = super().forward(
+                output_i = super().forward(
                     images=images_clip_extend[: end_i - start_i],
                     attention_mask=attention_masks[start_i:end_i],
                     input_ids=input_ids[start_i:end_i],
                     output_hidden_states=True,
                 )
+                image_features = super().get_image_features()
                 output_hidden_states_batches.append(output_i.hidden_states)  # tuple of layers
                 if vision_mix:
                     image_embeddings[i] = 0.3 * self.model.projector(image_features) + 0.7 * image_embeddings[i]
@@ -405,13 +406,14 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 images_clip_list.append(images_clip_i)
             images_clip = torch.cat(images_clip_list, dim=0)
 
-            output, image_features = super().forward(
+            output = super().forward(
                 images=images_clip,
                 attention_mask=attention_masks,
                 input_ids=input_ids,
                 labels=labels,
                 output_hidden_states=True,
             )
+            image_features = super().get_image_features()
             output_hidden_states = output.hidden_states
             if vision_mix:
                 for i in range(len(offset) - 1):
@@ -576,7 +578,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 output_hidden_states=True,
                 return_dict_in_generate=True,
             )
-            output_hidden_states = outputs.hidden_states[-1]
+            output_hidden_states = outputs.hidden_states[-1][-1]
             output_ids = outputs.sequences
 
             seg_token_mask = output_ids[:, 1:] == self.seg_token_idx

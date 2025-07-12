@@ -126,15 +126,18 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             output_hidden_states = outputs.hidden_states
         else:
             output_hidden_states = hidden_states
-
+        self.image_features = image_features
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=output_hidden_states,  # outputs.hidden_states,
             attentions=outputs.attentions,
-        ), image_features
+        )
 
+    def get_image_features(self):
+        return self.image_features
+    
     def prepare_inputs_for_generation(
         self,
         input_ids,
